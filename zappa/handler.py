@@ -335,6 +335,35 @@ class LambdaHandler:
         print("get_function_for_cognito_trigger", self.settings.COGNITO_TRIGGER_MAPPING, trigger, self.settings.COGNITO_TRIGGER_MAPPING.get(trigger))
         return self.settings.COGNITO_TRIGGER_MAPPING.get(trigger)
 
+    def _encode_response_body(self, response, binary_support):
+        """Perform Response body encoding"""
+        encoded_body = None
+        is_base64_encoded = False
+        content_encoding = response.headers.get("Content-Encoding", None)
+        binary_encodings = ("gzip", "compress", "deflate", "br")
+        if binary_support and content_encoding in binary_encodings:
+            try:
+                encoded_body = base64.b64encode(response.data).decode("utf8")
+                is_base64_encoded = True
+            except UnicodeDecodeError as e:
+                logger.exception(e)
+                logger.error(
+                    f"Unable to decode resulting base64 encoded response.data as 'utf8': response.data={response.data}")
+                logger.warning("Using response.get_data(as_text=True)")
+                encoded_body = response.get_data(as_text=True)
+        else:
+            try:
+                encoded_body = response.get_data(as_text=True)
+            except UnicodeDecodeError:
+                # If data can't be decoded as utf-8, try processing as binary
+                logger.warning(
+                    "UnicodeDecodeError on response.get_data(as_text=True), "
+                    "unable to decode response.data as 'utf8': encoding as base64 isBase64Encoded=True"
+                )
+                encoded_body = base64.b64encode(response.data).decode("utf8")
+                is_base64_encoded = True
+        return encoded_body, is_base64_encoded
+
     def handler(self, event, context):
         """
         An AWS Lambda function which parses specific API Gateway input into a
@@ -549,13 +578,13 @@ class LambdaHandler:
                         zappa_returndict.setdefault('statusDescription', response.status)
 
                     if response.data:
-                        if settings.BINARY_SUPPORT and \
-                                not response.mimetype.startswith("text/") \
-                                and response.mimetype != "application/json":
-                            zappa_returndict['body'] = base64.b64encode(response.data).decode('utf-8')
-                            zappa_returndict["isBase64Encoded"] = True
-                        else:
-                            zappa_returndict['body'] = response.get_data(as_text=True)
+                        encoded_body, is_base64_encoded = self._encode_response_body(
+                            response=response,
+                            binary_support=settings.BINARY_SUPPORT
+                        )
+                        zappa_returndict["body"] = encoded_body
+                        if is_base64_encoded:
+                            zappa_returndict["isBase64Encoded"] = is_base64_encoded
 
                     zappa_returndict['statusCode'] = response.status_code
                     if 'headers' in event:
